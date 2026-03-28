@@ -1,0 +1,22 @@
+[
+  {
+    "number": 1,
+    "title": "Hello World!",
+    "url": "https://github.com/owner/repo/discussions/1",
+    "body": "This is the **first** discussion.",
+    "createdAt": "2025-06-15T10:30:00Z",
+    "updatedAt": "2025-07-01T08:00:00Z",
+    "author": { "login": "octocat" },
+    "category": { "name": "General" }
+  },
+  {
+    "number": 2,
+    "title": "Bug: something broke",
+    "url": "https://github.com/owner/repo/discussions/2",
+    "body": "Steps to reproduce:\n1. Do this\n2. Do that\n3. Observe crash",
+    "createdAt": "2025-08-01T12:00:00Z",
+    "updatedAt": "2025-08-02T14:30:00Z",
+    "author": { "login": "contributor" },
+    "category": { "name": "Q&A" }
+  }
+]

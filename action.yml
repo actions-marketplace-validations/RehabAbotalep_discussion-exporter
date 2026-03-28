@@ -1,0 +1,181 @@
+name: 'Discussion Exporter'
+description: 'Fetches GitHub Discussions via the GraphQL API and exports them as Markdown files with YAML frontmatter.'
+author: 'RehabAbotalep'
+
+branding:
+  icon: 'book-open'
+  color: 'blue'
+
+inputs:
+  token:
+    description: 'GitHub token with read:discussion permission. A fine-grained PAT is recommended.'
+    required: true
+  output-dir:
+    description: 'Directory to write Markdown files into.'
+    required: false
+    default: 'docs'
+  limit:
+    description: 'Maximum number of discussions to fetch. Pagination is used automatically when the value exceeds 100.'
+    required: false
+    default: '100'
+  repository:
+    description: 'Target repository in "owner/name" format. Defaults to the current repository.'
+    required: false
+    default: ''
+
+outputs:
+  files-written:
+    description: 'Number of Markdown files written.'
+    value: ${{ steps.convert.outputs.files-written }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Fetch discussions
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
+        INPUT_LIMIT: ${{ inputs.limit }}
+      run: |
+        set -euo pipefail
+
+        if ! [[ "${INPUT_LIMIT}" =~ ^[0-9]+$ ]] || (( INPUT_LIMIT < 1 )); then
+          echo "::error::limit must be a positive integer (got '${INPUT_LIMIT}')"
+          exit 1
+        fi
+
+        REPOSITORY="${INPUT_REPOSITORY:-${GITHUB_REPOSITORY}}"
+        if [[ "${REPOSITORY}" != */* ]]; then
+          echo "::error::repository must be in 'owner/name' format (got '${REPOSITORY}')"
+          exit 1
+        fi
+        OWNER="${REPOSITORY%%/*}"
+        NAME="${REPOSITORY##*/}"
+
+        limit=${INPUT_LIMIT}
+        fetched=0
+        cursor=""
+        : > "${RUNNER_TEMP}/discussions.jsonl"
+
+        while (( fetched < limit )); do
+          remaining=$((limit - fetched))
+          page_size=$((remaining > 100 ? 100 : remaining))
+          echo "Fetching up to ${page_size} discussions from ${OWNER}/${NAME} (fetched so far: ${fetched})..."
+
+          args=(
+            -f query='
+              query($owner: String!, $name: String!, $limit: Int!, $after: String) {
+                repository(owner: $owner, name: $name) {
+                  discussions(first: $limit, after: $after) {
+                    pageInfo {
+                      hasNextPage
+                      endCursor
+                    }
+                    nodes {
+                      number
+                      title
+                      url
+                      body
+                      createdAt
+                      updatedAt
+                      author { login }
+                      category { name }
+                    }
+                  }
+                }
+              }'
+            -f owner="${OWNER}"
+            -f name="${NAME}"
+            -F limit="${page_size}"
+          )
+          if [ -n "${cursor}" ]; then
+            args+=(-f after="${cursor}")
+          fi
+
+          gh api graphql "${args[@]}" > "${RUNNER_TEMP}/page_response.json"
+
+          if jq -e '.errors[0]' "${RUNNER_TEMP}/page_response.json" > /dev/null 2>&1; then
+            echo "::error::GraphQL query failed:"
+            jq -r '.errors[] | .message' "${RUNNER_TEMP}/page_response.json" >&2
+            exit 1
+          fi
+
+          jq -c '.data.repository.discussions.nodes[]' "${RUNNER_TEMP}/page_response.json" \
+            >> "${RUNNER_TEMP}/discussions.jsonl"
+
+          new_count=$(jq '.data.repository.discussions.nodes | length' "${RUNNER_TEMP}/page_response.json")
+          fetched=$((fetched + new_count))
+
+          has_next=$(jq -r '.data.repository.discussions.pageInfo.hasNextPage' "${RUNNER_TEMP}/page_response.json")
+          if [ "${has_next}" != "true" ]; then
+            break
+          fi
+          cursor=$(jq -r '.data.repository.discussions.pageInfo.endCursor' "${RUNNER_TEMP}/page_response.json")
+        done
+
+        if [ -s "${RUNNER_TEMP}/discussions.jsonl" ]; then
+          jq -s '.' "${RUNNER_TEMP}/discussions.jsonl" > "${RUNNER_TEMP}/discussions.json"
+        else
+          echo '[]' > "${RUNNER_TEMP}/discussions.json"
+        fi
+        echo "Fetched ${fetched} discussions total."
+
+    - name: Convert to Markdown
+      id: convert
+      shell: bash
+      env:
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+      run: |
+        set -euo pipefail
+        mkdir -p "${OUTPUT_DIR}"
+        count=0
+
+        jq -j '.[] |
+          ((.title | ascii_downcase | gsub("[^a-z0-9]"; "-") | gsub("-+"; "-") | gsub("^-+|-+$"; "")) | if . == "" then "discussion" else . end) as $slug |
+          "\(.number)\u0000" +
+          "\($slug)\u0000" +
+          "\(.title | @json)\u0000" +
+          "\(.author.login // "unknown" | @json)\u0000" +
+          "\(.category.name // "" | @json)\u0000" +
+          "\(.url | @json)\u0000" +
+          "\(.createdAt | split("T")[0])\u0000" +
+          "\(.updatedAt | split("T")[0])\u0000" +
+          "\(.body // "")\u0000"
+        ' "${RUNNER_TEMP}/discussions.json" > "${RUNNER_TEMP}/discussions.nul"
+
+        while IFS= read -r -d '' number && \
+              IFS= read -r -d '' slug && \
+              IFS= read -r -d '' yaml_title && \
+              IFS= read -r -d '' yaml_author && \
+              IFS= read -r -d '' yaml_category && \
+              IFS= read -r -d '' url && \
+              IFS= read -r -d '' created && \
+              IFS= read -r -d '' updated && \
+              IFS= read -r -d '' body; do
+
+          filename="${OUTPUT_DIR}/${number}-${slug}.md"
+
+          {
+            printf '%s\n' '---'
+            printf 'number: %s\n' "${number}"
+            printf 'title: %s\n' "${yaml_title}"
+            printf 'author: %s\n' "${yaml_author}"
+            printf 'category: %s\n' "${yaml_category}"
+            printf 'url: %s\n' "${url}"
+            printf 'created: %s\n' "${created}"
+            printf 'updated: %s\n' "${updated}"
+            printf '%s\n' '---'
+            printf '\n'
+            printf '%s\n' "${body}"
+          } > "${filename}"
+
+          count=$((count + 1))
+        done < "${RUNNER_TEMP}/discussions.nul"
+
+        echo "files-written=${count}" >> "${GITHUB_OUTPUT}"
+        if (( count == 0 )); then
+          echo "::notice::No discussions found. 0 files written."
+        else
+          echo "Wrote ${count} Markdown files to ${OUTPUT_DIR}."
+        fi
