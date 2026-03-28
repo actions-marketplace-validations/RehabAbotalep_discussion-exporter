@@ -1,5 +1,5 @@
 name: 'Discussion Exporter'
-description: 'Fetches GitHub Discussions via the GraphQL API and exports them as Markdown files with YAML frontmatter.'
+description: 'Automatically export GitHub Discussions to markdown files into the repo.'
 author: 'RehabAbotalep'
 
 branding:
